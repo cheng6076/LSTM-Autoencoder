@@ -14,7 +14,7 @@ In general, with proper parameter settings the model can recover 80%-90% of the 
 To train a model with default setting, simply run
     th LSTMAutoencoder.lua
 The code generates samples at validation time, to inspect the effective of reconstruction.
-One may consider to use the Autoencoder is obtaining general purpose sentence vectors, or as a pretraining step for downstream tasks 
+One may consider to use the Autoencoder to obtain general purpose sentence vectors, or as a pretraining step for downstream tasks 
 
 ## References
 * Li, Jiwei, Minh-Thang Luong, and Dan Jurafsky,
