@@ -47,20 +47,11 @@ function BatchLoaderC.create(data_dir, batch_size, max_sentence_l)
           mask = mask:sub(1, batch_size * math.floor(len / batch_size))
        end
        
-       local ydata = data:clone()
-
-       for i=1,data:size(1) do
-         for j=1, data:size(2) do
-           if data[i][j]== 0 then data[i][j]= 2 end -- we don't care what value it is set to since we have the mask
-         end
-       end
-
        x_batches = data:split(batch_size,1)
-       y_batches = ydata:split(batch_size,1)
        m_batches = mask:split(batch_size,1)
        nbatches = #x_batches	   
        self.split_sizes[split] = nbatches
-       self.all_batches[split] = {x_batches, y_batches, m_batches}
+       self.all_batches[split] = {x_batches, m_batches}
     end
     self.batch_idx = {0,0,0}
     print(string.format('data load done. Number of batches in train: %d, val: %d, test: %d', self.split_sizes[1], self.split_sizes[2], self.split_sizes[3]))
@@ -81,7 +72,7 @@ function BatchLoaderC:next_batch(split_idx)
     end
     -- pull out the correct next batch
     local idx = self.batch_idx[split_idx]
-    return self.all_batches[split_idx][1][idx], self.all_batches[split_idx][2][idx], self.all_batches[split_idx][3][idx]
+    return self.all_batches[split_idx][1][idx], self.all_batches[split_idx][2][idx]
 end
 
 function BatchLoaderC.text_to_tensor(input_files, out_vocabfile, out_tensorfile, out_maskfile, max_sentence_l)
@@ -93,8 +84,10 @@ function BatchLoaderC.text_to_tensor(input_files, out_vocabfile, out_tensorfile,
     local mask_tensors = {} 
     local vocab_count = {} -- vocab count 
     local max_sentence_l_tmp = 0 -- max sentence length
-    local idx2word = {tokens_START, tokens_END} -- SOS and EOS token
-    local word2idx = {}; word2idx[tokens_START] = 2; word2idx[tokens_END] = 3
+    local idx2word = {tokens_START} 
+    local word2idx = {}; word2idx[tokens_START] = 1
+    --local idx2word = {tokens_START, tokens_END} -- SOS and EOS token
+    --local word2idx = {}; word2idx[tokens_START] = 1; word2idx[tokens_END] = 2
     local split_counts = {}
 
     -- first go through train/valid/test to get max sentence length
@@ -147,8 +140,8 @@ function BatchLoaderC.text_to_tensor(input_files, out_vocabfile, out_tensorfile,
              if word_num == max_sentence_l + 1 then break end -- leave the last token to EOS
           end
           -- append the end token
-          output_tensors[split][sentence_num][word_num+1] = word2idx[tokens_END]
-          mask_tensors[split][sentence_num][word_num+1] = 1
+          --output_tensors[split][sentence_num][word_num+1] = word2idx[tokens_END]
+          --mask_tensors[split][sentence_num][word_num+1] = 1
        end
     end
     print "done"

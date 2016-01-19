@@ -1,8 +1,8 @@
--- s1537177
 require 'torch'
 require 'nn'
 require 'nngraph'
 require 'rnn'
+require 'optim'
 model_utils = require 'util.model_utils'
 BatchLoader = require 'util.BatchLoaderC'
 require 'util.MaskedLoss'
@@ -14,21 +14,24 @@ cmd = torch.CmdLine()
 cmd:text()
 cmd:text('Options')
 cmd:option('-data_dir', 'corpus', 'path of the dataset')
+cmd:option('-sample_dir', 'samples', 'path of the sampled sentences')
 cmd:option('-batch_size', 10, 'batch size')
-cmd:option('-max_epochs', 25, 'number of full passes through the training data')
-cmd:option('-rnn_size', 200, 'dimensionality of sentence embeddings')
-cmd:option('-word_vec_size', 50, 'dimensionality of word embeddings')
-cmd:option('-max_sentence_l', '10', 'maximum number of words in each sentence')
+cmd:option('-max_epochs', 50, 'number of full passes through the training data')
+cmd:option('-rnn_size', 300, 'dimensionality of sentence embeddings')
+cmd:option('-word_vec_size', 150, 'dimensionality of word embeddings')
+cmd:option('-max_sentence_l', '30', 'maximum number of words in each sentence')
 cmd:option('-num_layers', 1, 'number of layers in the LSTM')
 cmd:option('-dropout',0.5,'dropout. 0 = no dropout')
 cmd:option('-seed',3435,'torch manual random number generator seed')
-cmd:option('-print_every',5,'how many steps/minibatches between printing out the loss')
-cmd:option('-save_every', 40000, 'save when seeing n examples')
+cmd:option('-print_every',50,'how many steps/minibatches between printing out the loss')
+cmd:option('-save_every', 2000, 'save when seeing n examples')
 cmd:option('-checkpoint_dir', 'cv', 'output directory where checkpoints get written')
 cmd:option('-savefile','model','filename to autosave the checkpont to. Will be inside checkpoint_dir/')
 cmd:option('-checkpoint', 'checkpoint.t7', 'start from a checkpoint if a valid checkpoint.t7 file is given')
-cmd:option('-learningRate', 0.1, 'learning rate')
-cmd:option('-decayRate',0.75,'decay rate for sgd')
+cmd:option('-beta1', 0.9, 'momentum parameter 1')
+cmd:option('-beta2', 0.999, 'momentum parameter 2')
+cmd:option('-learningRate', 0.001, 'learning rate')
+cmd:option('-decayRate',0.97,'decay rate for sgd')
 cmd:option('-decay_when',0.1,'decay if validation does not improve by more than this much')
 cmd:option('-param_init', 0.05, 'initialize parameters at')
 cmd:option('-max_grad_norm',5,'normalize gradients at')
@@ -87,22 +90,36 @@ for L=1,opt.num_layers do
   table.insert(init_state, h_init:clone())
 end
 
+--this extracts a specific layer from a gmodule
+function get_layer(layer)
+  if layer.name ~= nil then
+    if layer.name == 'enc_lookup' then
+      enc_lookup = layer
+    elseif layer.name == 'dec_lookup' then
+      dec_lookup = layer
+    end
+  end
+end 
+protos.enc:apply(get_layer)
+protos.dec:apply(get_layer)
+
 --evaluation
-function eval_split(split_idx)
+function eval_split(split_idx, rf)
   print('evaluating loss over split index ' .. split_idx)
   local n = loader.split_sizes[split_idx]
   loader:reset_batch_pointer(split_idx)
   local loss = 0
   local count = 0
   for i = 1,n do
-    local x, y, m = loader:next_batch(split_idx)
+    local x, m = loader:next_batch(split_idx)
+    local tmp_sentence = torch.zeros(opt.batch_size, opt.seq_length-1) --store sentence batch
     if opt.gpuid >= 0 then
       x = x:float():cuda()
-      y = y:float():cuda()
       m = m:float():cuda()
     end
-    labels = y:sub(1,-1,2,-1):clone()
-    y = y:sub(1,-1,1,-2)
+    labels = x:sub(1,-1,2,-1):clone()
+    y = x:sub(1,-1,1,-2):clone() + 1
+    x = x + 1
     local enc_state = {[0] = init_state}
     for t=1,opt.seq_length do
       clones.enc[t]:evaluate()
@@ -110,18 +127,39 @@ function eval_split(split_idx)
       enc_state[t] = {}
       for i=1,#init_state do table.insert(enc_state[t], lst[i]) end
     end
+
     local dec_state = {[0] = enc_state[opt.seq_length]}
-    local predictions = {}
     for t=1,opt.seq_length-1 do
       clones.dec[t]:evaluate()
       local lst = clones.dec[t]:forward{y[{{},t}], unpack(dec_state[t-1])}
       dec_state[t] = {}
       for i=1,#init_state do table.insert(dec_state[t], lst[i]) end
-      predictions[t] = lst[#lst]
-      local result = clones.criterion[t]:forward({predictions[t], labels[{{},t}]})
+      local predictions = lst[#lst]
+      local maxs, indices = predictions:max(2)
+      tmp_sentence[{{},t}]:copy(indices)
+      local result = clones.criterion[t]:forward({predictions, labels[{{},t}]})
       loss = loss + result[1]
       count = count + result[3]
     end
+--write to file
+    print('writing' .. i .. '/' .. n .. '...')
+    for j=1,opt.batch_size do
+      for k=1, opt.seq_length-1 do
+        if labels[j][k] > 0 then
+          rf:write(loader.idx2word[labels[j][k]])
+          rf:write(' ')
+        end
+      end
+      rf:write('\n')
+      for k=1, opt.seq_length-1 do
+        if labels[j][k] > 0 then
+          rf:write(loader.idx2word[tmp_sentence[j][k]])
+          rf:write(' ')
+        end
+      end
+      rf:write('\n\n')
+    end
+    collectgarbage()
   end
   return loss / count
 end
@@ -134,14 +172,14 @@ function feval(x)
   end
   grad_params:zero()
   -- load data
-  local x, y, m = loader:next_batch(1)
+  local x, m = loader:next_batch(1)
   if opt.gpuid >= 0 then
     x = x:float():cuda()
-    y = y:float():cuda()
     m = m:float():cuda()
   end
-  labels = y:sub(1,-1,2,-1):clone()
-  y = y:sub(1,-1,1,-2)
+  labels = x:sub(1,-1,2,-1):clone()
+  y = x:sub(1,-1,1,-2):clone() + 1 
+  x = x + 1
   local loss = 0
   local count = 0
   -- Forward pass
@@ -196,21 +234,29 @@ function feval(x)
     shrink_factor = opt.max_grad_norm / grad_norm
     grad_params:mul(shrink_factor)
   end
-  params:add(grad_params:mul(-lr))
-  return loss / count 
+  return loss / count, grad_params
 end
 
 -- start training
 train_losses = {}
 val_losses = {}
-lr = opt.learningRate
+local optim_state = {learningRate = opt.learningRate, beta1 = opt.beta1, beta2 = opt.beta2}
 local iterations = opt.max_epochs * loader.split_sizes[1]
 for i = 1, iterations do
   -- train 
   local epoch = i / loader.split_sizes[1]
   local timer = torch.Timer()
   local time = timer:time().real
-  train_losses[i] = feval(params)
+  local _, loss = optim.adam(feval, params, optim_state)
+  train_losses[i] = loss[1] --loss is a table, we need to flatten it
+  
+  -- ###The first index of LookupTable is always 0.###
+  enc_lookup.weight[1]:zero()
+  enc_lookup.gradWeight[1]:zero()
+  dec_lookup.weight[1]:zero()
+  dec_lookup.gradWeight[1]:zero()
+  -- ###
+
   if i % opt.print_every == 0 then
     print(string.format("%d/%d (epoch %.2f), train_loss = %6.4f", i, iterations, epoch, train_losses[i]))
   end
@@ -218,7 +264,9 @@ for i = 1, iterations do
   -- validate and save checkpoints
   if epoch == opt.max_epochs or i % opt.save_every == 0 then
     print ('evaluate on validation set')
-    local val_loss = eval_split(2) -- 2 = validation
+    rf = io.open(opt.sample_dir .. '/samples'..i, 'w')
+    local val_loss = eval_split(2, rf) -- 2 = validation
+    rf:close()
     val_losses[#val_losses+1] = val_loss
     local savefile = string.format('%s/model_%s_epoch%.2f_%.2f.t7', opt.checkpoint_dir, opt.savefile, epoch, val_loss)
     local checkpoint = {}
@@ -234,7 +282,7 @@ for i = 1, iterations do
   -- decay learning rate
   if i % loader.split_sizes[1] == 0 and #val_losses > 2 then
     if val_losses[#val_losses-1] - val_losses[#val_losses] < opt.decay_when then
-      lr = lr * opt.decayRate
+      opt.learningRate = opt.learningRate * opt.decayRate
     end
   end
 
@@ -245,6 +293,5 @@ for i = 1, iterations do
   end
 end
 
--- end with test
-test_loss = eval_split(3)
-print (string.format("test_loss = %6.4f", test_loss))
+--test_loss = eval_split(3)
+--print (string.format("test_loss = %6.4f", test_loss))
