@@ -65,7 +65,6 @@ for line in f:lines() do
   for word in line:gmatch'([^%s]+)' do
     if word2idx[word]~=nil then table.insert(sentence, word2idx[word]) end
   end
-  table.insert(sentence, word2idx['END'])
   local sentence_emb = torch.zeros(opt2.rnn_size)
   if #sentence>2 then
     sentence = torch.Tensor(sentence)
