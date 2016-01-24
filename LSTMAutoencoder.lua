@@ -1,7 +1,6 @@
 require 'torch'
 require 'nn'
 require 'nngraph'
-require 'rnn'
 require 'optim'
 model_utils = require 'util.model_utils'
 BatchLoader = require 'util.BatchLoaderC'
